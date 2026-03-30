@@ -1,0 +1,32 @@
+app:
+  name: "feed-system"
+  port: 8080
+  env: "dev"
+
+log:
+  level: "debug"
+  path: "./log/api.log"
+  env: "dev"
+  mode: "dev"
+
+mysql:
+  dsn: "root:123456@tcp(192.168.100.128:3306)/feed_db?charset=utf8mb4&parseTime=True&loc=Local"
+  max_open_conns: 100
+  max_idle_conns: 20
+
+redis:
+  addr: "192.168.100.128:6379"
+  password: ""
+  db: 0
+  pool_size: 100
+
+kafka:
+  brokers: 
+    - "192.168.100.128:9092"
+  topic_seckill: "feed"
+
+salt: "caodjhoadnp"
+
+JwtSecret: "seckill_super_secret_key_2026"
+
+port: 8080
