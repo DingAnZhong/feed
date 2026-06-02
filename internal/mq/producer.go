@@ -28,13 +28,20 @@ func InitKafka(addrs []string) error {
 
 // SendPostPublishEvent 发送发帖事件到 Kafka
 func SendPostPublishEvent(event *model.PostPublishEvent) error {
-	bytes, _ := json.Marshal(event)
+	// 如果 Kafka 未初始化，返回空（跳过消息发送）
+	if Producer == nil {
+		return nil
+	}
+	bytes, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("消息序列化失败：%w", err)
+	}
 	msg := &sarama.ProducerMessage{
 		Topic: TopicPostPublish,
 		Value: sarama.ByteEncoder(bytes),
 	}
 
-	_, _, err := Producer.SendMessage(msg)
+	_, _, err = Producer.SendMessage(msg)
 	if err != nil {
 		return fmt.Errorf("发送消息失败：%w", err)
 	}

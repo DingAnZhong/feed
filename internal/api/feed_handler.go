@@ -20,18 +20,26 @@ func FetchFeedHandler(c *gin.Context) {
 
 	latestTimeStr := c.DefaultQuery("latest_time", "0")
 	limitStr := c.DefaultQuery("limit", "10")
+	feedType := c.DefaultQuery("feed_type", "timeline") // timeline | popular
 
 	latestTime, _ := strconv.ParseInt(latestTimeStr, 10, 64)
 	limit, _ := strconv.Atoi(limitStr)
 
-	posts, next_time, err := service.FetchFeed(c.Request.Context(), userID, latestTime, limit)
+	var posts []*model.Post
+	var err error
+	var nextTime int64
 
+	if feedType == "popular" {
+		posts, nextTime, err = service.FetchPopularFeed(c.Request.Context(), limit)
+	} else {
+		posts, nextTime, err = service.FetchFeed(c.Request.Context(), userID, latestTime, limit)
+	}
 	if err != nil {
-		response.Response(c, 200, "获取帖子失败", nil)
+		response.Response(c, 500, "获取帖子失败", err.Error())
 		return
 	}
-	response.Response(c, 200, "获取帖子成功", &FetchFeedData{
+	response.Response(c, 0, "获取帖子成功", &FetchFeedData{
 		Posts:    posts,
-		NextTime: next_time,
+		NextTime: nextTime,
 	})
 }

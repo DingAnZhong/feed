@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS `posts` (
     `user_id` BIGINT NOT NULL COMMENT '作者的用户ID',
     `content` TEXT NOT NULL COMMENT '帖子文本内容',
     `media_urls` JSON COMMENT '图片/视频URL列表 (JSON格式)',
+    `status` TINYINT DEFAULT 0 COMMENT '审核状态: 0-正常 1-审核中 2-不通过',
     `like_count` INT DEFAULT 0 COMMENT '点赞数',
     `comment_count` INT DEFAULT 0 COMMENT '评论数',
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -43,7 +44,7 @@ CREATE TABLE IF NOT EXISTS `relations` (
 
 
 -- 1. 插入多层级的用户群
-INSERT INTO `users` (`id`, `nickname`, `avatar`) VALUES 
+INSERT INTO `users` (`id`, `nickname`, `avatar`) VALUES
 -- 【超级大V】 (粉丝量巨大，适合测试 Pull 拉模式)
 (1001, '明星大V_鹿晗', 'https://avatar.com/luhan.jpg'),
 (1002, '明星大V_周杰伦', 'https://avatar.com/jay.jpg'),
@@ -54,11 +55,11 @@ INSERT INTO `users` (`id`, `nickname`, `avatar`) VALUES
 (1102, '深夜放毒美食家', 'https://avatar.com/food.jpg'),
 
 -- 【普通粉丝/吃瓜群众】
-(2001, '普通粉丝_A (杰迷)', 'https://avatar.com/a.jpg'),
-(2002, '普通粉丝_B (鹿饭)', 'https://avatar.com/b.jpg'),
-(2003, '普通粉丝_C (吃货)', 'https://avatar.com/c.jpg'),
-(2004, '普通粉丝_D (极客)', 'https://avatar.com/d.jpg'),
-(2005, '普通粉丝_E (理智粉)', 'https://avatar.com/e.jpg');
+(2001, '普通粉丝_A_杰迷', 'https://avatar.com/a.jpg'),
+(2002, '普通粉丝_B_鹿饭', 'https://avatar.com/b.jpg'),
+(2003, '普通粉丝_C_吃货', 'https://avatar.com/c.jpg'),
+(2004, '普通粉丝_D_极客', 'https://avatar.com/d.jpg'),
+(2005, '普通粉丝_E_理智粉', 'https://avatar.com/e.jpg');
 
 
 -- 2. 建立错综复杂的关注网络

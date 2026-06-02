@@ -1,0 +1,104 @@
+已创建的测试文件
+
+  Service 层测试 (internal/service/)
+  
+  1. test_setup.go - 测试环境初始化
+    - 提供 setupTest() 函数统一初始化 logger、雪花算法、DB 和 Redis
+    - 返回是否初始化成功
+  2. post_service_test.go - PostService 测试 (P0)
+    - TestPublishPost_ContentValidation - 内容校验测试
+    - TestErrContentEmpty - 空内容错误测试
+    - TestErrContentTooLong - 内容过长错误测试
+    - TestPostStatusConstants - 帖子状态常量测试
+    - TestPublishPost_PostIDGeneration - postID 生成测试
+  3. feed_service_test.go - FeedService 测试 (P0)
+    - TestFetchFeed_LimitValidation - limit 校验测试
+    - TestFetchFeed_EmptyTimeline - 空时间线处理测试
+    - TestFetchFeed_Success - 成功获取 Feed 流测试
+    - TestFetchFeed_Pagination - 游标分页测试
+    - TestFetchPopularFeed_LimitValidation - 热门 Feed limit 校验测试
+    - TestFetchFeed_FilterRejectedPosts - 过滤审核不通过帖子测试
+    - TestFetchFeed_PostOrdering - 帖子排序测试
+  4. user_service_test.go - UserService 测试 (P1)
+    - TestFollowAction_CannotFollowSelf - 不能关注自己测试
+    - TestFollowAction_UserNotFound - 用户不存在测试
+    - TestFollowAction_InvalidAction - 无效动作测试
+    - TestFollowAction_Success - 关注成功测试
+    - TestIsFollowing - IsFollowing 函数测试
+    - TestGetUserInfo - 获取用户信息测试
+    - TestGetUserFollowStats - 获取关注/粉丝统计测试
+    - TestSyncUserCountFromDB - 同步计数测试
+    - TestRegisterUser - 用户注册测试
+
+  Repository 层测试 (internal/repository/)
+
+  1. post_repo_test.go - PostRepo 测试 (P1)
+    - TestCreatePost - 创建帖子测试
+    - TestGetPostsByIDs_EmptyList - 空 ID 列表测试
+    - TestGetPostsByIDs_SinglePost - 单个帖子查询测试
+    - TestGetPostsByIDs_MultiplePosts - 批量查询测试
+    - TestGetPostsByIDs_NonExistentIDs - 不存在的 ID 测试
+    - TestGetPostsByIDs_MixedIDs - 混合存在/不存在 ID 测试
+    - TestGetPostsByUserID - 按用户 ID 查询测试
+    - TestUpdatePostStatus - 更新帖子状态测试
+  2. feed_cache_test.go - FeedCache 测试 (P1)
+    - TestGetPopularPosts - 获取热门帖子测试
+
+  运行测试
+
+  # 运行所有测试
+  go test ./...
+
+  # 运行特定测试包
+  go test -v ./internal/service/...
+  go test -v ./internal/repository/...
+
+============================================================
+                        压测报告
+============================================================
+
+压测环境:
+  - MySQL: 127.0.0.1:13306
+  - Redis: 127.0.0.1:6379
+  - Kafka: 127.0.0.1:9092
+
+压测结果:
+
+场景 1: 发帖压测
+  - 吞吐量: 3214.44 req/s
+  - 平均延迟: 19.26ms
+  - P50 延迟: 21.88ms
+  - P90 延迟: 26.59ms
+  - P95 延迟: 27.09ms
+  - P99 延迟: 28.08ms
+  - 成功率: 100%
+
+场景 2: Feed流拉取压测
+  - 吞吐量: 4155.78 req/s
+  - 平均延迟: 11.92ms
+  - P50 延迟: 9.06ms
+  - P90 延迟: 22.04ms
+  - P95 延迟: 22.54ms
+  - P99 延迟: 23.08ms
+  - 成功率: 100%
+
+场景 3: 关注操作压测
+  - 吞吐量: 7098.14 req/s
+  - 平均延迟: 7.17ms
+  - P50 延迟: 7.52ms
+  - P90 延迟: 12.61ms
+  - P95 延迟: 12.61ms
+  - P99 延迟: 13.10ms
+  - 成功率: 100%
+
+场景 4: 混合并发压测
+  - 吞吐量: 7861.64 req/s
+  - 平均延迟: 893µs
+  - 成功率: 100%
+
+测试总结:
+  - Service 层: 22 个测试全部通过
+  - Repository 层: 9 个测试全部通过
+  - 所有压测请求 100% 成功
+
+============================================================

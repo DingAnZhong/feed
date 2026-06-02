@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 
+	"github.com/DingAnZhong/feed/internal/model"
 	"github.com/DingAnZhong/feed/pkg/logger"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -36,57 +38,140 @@ return 1
 var pushScript = redis.NewScript(pushFeedLua)
 
 // PushToTimeline 将帖子推送到一批粉丝的收件箱中 (写扩散 Push)
-// followerIDs: 粉丝的 ID 列表 (可能有一千个)
-// postID: 帖子 ID
-// timestamp: 帖子发布的时间戳 (用作 ZSet 的 Score)
+// 使用并发推送，每个粉丝独立上下文，单条失败不阻断其他粉丝
 func PushToTimeline(ctx context.Context, followerIDs []int64, postID int64, timestamp int64) error {
 	if len(followerIDs) == 0 {
 		return nil
 	}
 
-	pipe := RDB.Pipeline()
-	for _, followerID := range followerIDs {
-		key := fmt.Sprintf("%s%d", feedTimelineKeyPrefix, followerID)
-		pushScript.Run(ctx, pipe, []string{key}, timestamp, postID, maxTimelineLength)
-	}
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		logger.Warn("PushToTimeLine failed", zap.Error(err))
-		return fmt.Errorf("PushToTimeLine failed:%w", err)
+	const (
+		workerCount = 16 // 并发 worker 数量
+	)
+
+	type result struct {
+		followerID int64
+		err        error
 	}
 
+	jobCh := make(chan int64, len(followerIDs))
+	resultCh := make(chan result, len(followerIDs))
+
+	// 启动固定数量的 worker
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for followerID := range jobCh {
+				key := fmt.Sprintf("%s%d", feedTimelineKeyPrefix, followerID)
+				err := pushScript.Run(ctx, RDB, []string{key}, timestamp, postID, maxTimelineLength).Err()
+				resultCh <- result{followerID: followerID, err: err}
+			}
+		}()
+	}
+
+	// 分发任务
+	for _, fid := range followerIDs {
+		jobCh <- fid
+	}
+	close(jobCh)
+
+	// 等待所有 worker 完成
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	// 收集结果
+	var lastErr error
+	for res := range resultCh {
+		if res.err != nil {
+			logger.Warn("单条粉丝推送失败", zap.Error(res.err),
+				zap.Int64("follower_id", res.followerID),
+				zap.Int64("post_id", postID),
+			)
+			lastErr = fmt.Errorf("push to follower %d failed: %w", res.followerID, res.err)
+		}
+	}
+	return lastErr
+}
+
+// PushToSelfTimeline 将帖子推送到发帖者自己的收件箱
+func PushToSelfTimeline(ctx context.Context, userID int64, postID int64, timestamp int64) error {
+	key := fmt.Sprintf("%s%d", feedTimelineKeyPrefix, userID)
+	err := pushScript.Run(ctx, RDB, []string{key}, timestamp, postID, maxTimelineLength).Err()
+	if err != nil {
+		return fmt.Errorf("push to self timeline failed: %w", err)
+	}
 	return nil
 }
 
 // GetTimeline 从用户的收件箱拉取 Feed 流 (游标分页)
 // userID: 当前登录用户
-// latestTime: 游标（上一次拉取的最后一条帖子的时间戳），如果是第一次拉取，传系统的当前时间戳
+// latestTime: 游标（上一次拉取的最后一条帖子的时间戳），首次拉取传 0 表示拉全部最新
 // limit: 本次拉取多少条 (通常是 10-20 条)
 func GetTimeline(ctx context.Context, userID int64, latestTime int64, limit int) ([]int64, error) {
 	key := fmt.Sprintf("%s%d", feedTimelineKeyPrefix, userID)
 	var postIDs []int64
 
-	opt := &redis.ZRangeArgs{
-		Key:     key,
-		Start:   fmt.Sprintf("(%d", latestTime),
-		Stop:    "-inf",
-		ByScore: true,
-		Rev:     true,
-		Offset:  0,
-		Count:   int64(limit),
+	// 如果 Redis 未初始化，返回空结果
+	if RDB == nil {
+		return postIDs, nil
 	}
-	result, err := RDB.ZRangeArgs(ctx, *opt).Result()
+
+	// Redis 3.0 上 ZRevRangeByScore 返回空结果，改用 ZRangeByScore + 手动反转
+	// 先取最新的 limit 条
+	result, err := RDB.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min: "-inf",
+		Max: "+inf",
+		Count: int64(limit),
+	}).Result()
 	if err != nil {
-		logger.Warn("GetTimeLine failed")
-		return postIDs, fmt.Errorf("GetTimeLine failed:%w", err)
+		logger.Warn("GetTimeline failed")
+		return postIDs, fmt.Errorf("GetTimeline failed:%w", err)
 	}
+
+	// ZRangeByScore 返回升序（旧的在前），反转得到降序（新的在前）
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+
+	// 游标过滤：保留分数严格小于 latestTime 的帖子（比游标更旧的）
+	if latestTime > 0 {
+		filtered := make([]string, 0, len(result))
+		for _, id := range result {
+			score, _ := RDB.ZScore(ctx, key, id).Result()
+			if score < float64(latestTime) {
+				filtered = append(filtered, id)
+			}
+		}
+		result = filtered
+	}
+
 	for _, re := range result {
 		reInt, err := strconv.ParseInt(re, 10, 64)
 		if err != nil {
-			logger.Warn("GetTimeLine ParseInt failed")
-			return postIDs, fmt.Errorf("GetTimeLine ParseInt failed:%w", err)
+			logger.Warn("GetTimeline ParseInt failed")
+			return postIDs, fmt.Errorf("GetTimeline ParseInt failed:%w", err)
 		}
 		postIDs = append(postIDs, reInt)
 	}
 	return postIDs, nil
+}
+
+// GetPopularPosts 获取热门帖子（按点赞数降序）
+func GetPopularPosts(ctx context.Context, limit int) ([]*model.Post, error) {
+	var posts []*model.Post
+
+	// 如果 DB 未初始化，返回空结果
+	if DB == nil {
+		return posts, nil
+	}
+
+	err := DB.WithContext(ctx).Order("like_count DESC, id DESC").Limit(limit).Find(&posts).Error
+	if err != nil {
+		logger.Warn("GetPopularPosts failed", zap.Error(err))
+		return nil, fmt.Errorf("GetPopularPosts failed:%w", err)
+	}
+	return posts, nil
 }

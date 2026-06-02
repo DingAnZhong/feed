@@ -2,12 +2,27 @@ app:
   name: "feed-system"
   port: 8080
   env: "dev"
+  # 大 V 阈值（粉丝数超过此值降级为拉模式）
+  huge_user_follower_threshold: 10000
+  # 本地缓存配置
+  local_cache:
+    enabled: true
+    ttl_seconds: 30
+    max_items: 10000
+    empty_cache_ttl_seconds: 5
+
+auth:
+  jwt_secret: "seckill_super_secret_key_2026"
+  token_ttl: "2h"
+  refresh_token_ttl: "720h"  # 7天
 
 log:
   level: "debug"
-  path: "./log/api.log"
-  env: "dev"
   mode: "dev"
+  filename: "./log/app.log"
+  max_size: 100
+  max_backups: 10
+  max_age: 7
 
 mysql:
   dsn: "root:123456@tcp(192.168.100.128:3306)/feed_db?charset=utf8mb4&parseTime=True&loc=Local"
@@ -21,12 +36,6 @@ redis:
   pool_size: 100
 
 kafka:
-  brokers: 
+  brokers:
     - "192.168.100.128:9092"
-  topic_seckill: "feed"
-
-salt: "caodjhoadnp"
-
-JwtSecret: "seckill_super_secret_key_2026"
-
-port: 8080
+  topic_feed: "feed"

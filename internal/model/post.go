@@ -10,6 +10,7 @@ type Post struct {
 	UserID       int64     `gorm:"index:idx_user_id;not null;comment:作者ID" json:"user_id"`
 	Content      string    `gorm:"type:text;not null;comment:文本内容" json:"content"`
 	MediaUrls    []string  `gorm:"type:json;serializer:json;comment:图片URL列表" json:"media_urls"`
+	Status       int       `gorm:"default:0;comment:审核状态: 0-正常 1-审核中 2-不通过" json:"status"`
 	LikeCount    int       `gorm:"default:0;comment:点赞数" json:"like_count"`
 	CommentCount int       `gorm:"default:0;comment:评论数" json:"comment_count"`
 	CreatedAt    time.Time `gorm:"autoCreateTime" json:"create_time"`
