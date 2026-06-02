@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/DingAnZhong/feed/internal/model"
 	"github.com/DingAnZhong/feed/pkg/logger"
@@ -110,6 +111,7 @@ func PushToSelfTimeline(ctx context.Context, userID int64, postID int64, timesta
 // userID: 当前登录用户
 // latestTime: 游标（上一次拉取的最后一条帖子的时间戳），首次拉取传 0 表示拉全部最新
 // limit: 本次拉取多少条 (通常是 10-20 条)
+// 返回按时间倒序排列的帖子 ID 列表（最新的在前）
 func GetTimeline(ctx context.Context, userID int64, latestTime int64, limit int) ([]int64, error) {
 	key := fmt.Sprintf("%s%d", feedTimelineKeyPrefix, userID)
 	var postIDs []int64
@@ -119,35 +121,32 @@ func GetTimeline(ctx context.Context, userID int64, latestTime int64, limit int)
 		return postIDs, nil
 	}
 
-	// Redis 3.0 上 ZRevRangeByScore 返回空结果，改用 ZRangeByScore + 手动反转
-	// 先取最新的 limit 条
-	result, err := RDB.ZRangeByScore(ctx, key, &redis.ZRangeBy{
-		Min: "-inf",
-		Max: "+inf",
-		Count: int64(limit),
-	}).Result()
+	// 使用 ZRevRangeByScore 获取时间倒序的帖子（最新的在前）
+	// ZRevRangeByScore 从最大分数开始（最新的帖子）
+	var result []string
+	var err error
+
+	if latestTime > 0 {
+		// 有游标：获取分数严格小于 latestTime 的帖子（更旧的）
+		result, err = RDB.ZRevRangeByScore(ctx, key, &redis.ZRangeBy{
+			Max:   strconv.FormatInt(latestTime, 10),
+			Min:   "-inf",
+			Count: int64(limit),
+		}).Result()
+	} else {
+		// 首次拉取：获取最新的 limit 条
+		result, err = RDB.ZRevRangeByScore(ctx, key, &redis.ZRangeBy{
+			Max:   "+inf",
+			Min:   "-inf",
+			Count: int64(limit),
+		}).Result()
+	}
 	if err != nil {
 		logger.Warn("GetTimeline failed")
 		return postIDs, fmt.Errorf("GetTimeline failed:%w", err)
 	}
 
-	// ZRangeByScore 返回升序（旧的在前），反转得到降序（新的在前）
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
-	}
-
-	// 游标过滤：保留分数严格小于 latestTime 的帖子（比游标更旧的）
-	if latestTime > 0 {
-		filtered := make([]string, 0, len(result))
-		for _, id := range result {
-			score, _ := RDB.ZScore(ctx, key, id).Result()
-			if score < float64(latestTime) {
-				filtered = append(filtered, id)
-			}
-		}
-		result = filtered
-	}
-
+	// ZRevRangeByScore 已经按时间倒序返回（最新的在前），直接解析 ID
 	for _, re := range result {
 		reInt, err := strconv.ParseInt(re, 10, 64)
 		if err != nil {
@@ -156,6 +155,8 @@ func GetTimeline(ctx context.Context, userID int64, latestTime int64, limit int)
 		}
 		postIDs = append(postIDs, reInt)
 	}
+	// 调试日志：输出获取到的帖子 ID 顺序
+	logger.Debug("GetTimeline return postIDs", zap.Int64s("post_ids", postIDs))
 	return postIDs, nil
 }
 
@@ -173,5 +174,32 @@ func GetPopularPosts(ctx context.Context, limit int) ([]*model.Post, error) {
 		logger.Warn("GetPopularPosts failed", zap.Error(err))
 		return nil, fmt.Errorf("GetPopularPosts failed:%w", err)
 	}
+	return posts, nil
+}
+
+// GetTimelineFromPopularPosts 从热门帖子池拉取Feed流（拉模式）
+// 用于大 V 用户的补充 Feed 来源
+func GetTimelineFromPopularPosts(ctx context.Context, userID int64, latestTime int64, limit int) ([]*model.Post, error) {
+	var posts []*model.Post
+
+	// 如果 DB 未初始化，返回空结果
+	if DB == nil {
+		return posts, nil
+	}
+
+	// 查询热门帖子（点赞数高的）
+	query := DB.WithContext(ctx).Order("like_count DESC, id DESC")
+
+	// 游标过滤：如果 latestTime > 0，只获取比游标旧的帖子
+	if latestTime > 0 {
+		query = query.Where("created_at < ?", time.UnixMilli(latestTime))
+	}
+
+	err := query.Limit(limit).Find(&posts).Error
+	if err != nil {
+		logger.Warn("GetTimelineFromPopularPosts failed", zap.Error(err))
+		return nil, fmt.Errorf("GetTimelineFromPopularPosts failed:%w", err)
+	}
+
 	return posts, nil
 }

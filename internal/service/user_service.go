@@ -57,6 +57,11 @@ func FollowAction(ctx context.Context, followerID int64, followeeID int64, actio
 		)
 		return fmt.Errorf("FollowAction to DB failed:%w", err)
 	}
+
+	// 使双方用户的关注统计缓存失效
+	repository.CacheInvalidateFollowStats(followerID)
+	repository.CacheInvalidateFollowStats(followeeID)
+
 	return nil
 }
 
@@ -65,14 +70,18 @@ func IsFollowing(ctx context.Context, followerID int64, followeeID int64) bool {
 	return repository.IsFollowing(ctx, followerID, followeeID)
 }
 
-// GetUserInfo 获取用户信息
+// GetUserInfo 获取用户信息（使用多级缓存）
 func GetUserInfo(ctx context.Context, userID int64) (*model.User, error) {
-	return repository.GetUserByID(ctx, userID)
+	return repository.CacheGetUser(ctx, userID)
 }
 
-// GetUserFollowStats 获取用户的关注数和粉丝数
+// GetUserFollowStats 获取用户的关注数和粉丝数（使用多级缓存）
 func GetUserFollowStats(ctx context.Context, userID int64) (int64, int64, error) {
-	return repository.GetUserFollowStats(ctx, userID)
+	stats, err := repository.CacheGetFollowStats(ctx, userID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return stats.FollowingCount, stats.FollowerCount, nil
 }
 
 // SyncUserCountFromDB 从数据库同步用户关注/粉丝计数到 Redis
@@ -114,6 +123,9 @@ func RegisterUser(ctx context.Context, userID int64, nickname string) error {
 		)
 		return fmt.Errorf("注册失败: %w", err)
 	}
+
+	// 缓存新用户
+	repository.CacheSetUser(registeredUser)
 
 	logger.Info("用户注册成功",
 		zap.Int64("user_id", userID),

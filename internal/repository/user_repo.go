@@ -20,18 +20,19 @@ func CreateUser(ctx context.Context, user *model.User) error {
 	return nil
 }
 
-// GetUserByID 根据 ID 获取用户信息
+// GetUserByID 根据 ID 获取用户信息（直接查数据库，不走缓存）
+// 避免与 CacheGetUser 形成循环依赖
+// L1 本地缓存 → L2 Redis → L3 数据库
 func GetUserByID(ctx context.Context, id int64) (*model.User, error) {
+	// 直接查询数据库
 	var user model.User
-
 	err := DB.WithContext(ctx).Where("id = ?", id).First(&user).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			logger.Info("no such user")
+		if err == gorm.ErrRecordNotFound {
+			logger.Info("no such user", zap.Int64("user_id", id))
 			return nil, nil
 		}
-		logger.Warn("GetUserByID error", zap.Error(err))
-		return nil, fmt.Errorf("查询错误，并不是没数据:%w", err)
+		return nil, fmt.Errorf("查询用户失败: %w", err)
 	}
 	return &user, nil
 }
@@ -154,26 +155,22 @@ func GetFollowerIDs(ctx context.Context, followeeID int64) ([]int64, error) {
 }
 
 // GetUserFollowStats 获取用户的关注数和粉丝数
+// 注意：此函数直接查询数据库，不使用缓存，避免与 CacheGetFollowStats 形成循环依赖
 func GetUserFollowStats(ctx context.Context, userID int64) (followingCount, followerCount int64, err error) {
-	// 优先从 Redis 获取
-	followingCount, err = GetFolloweeCount(ctx, userID)
+	// 查询关注数
+	err = DB.WithContext(ctx).Model(&model.Relation{}).
+		Where("follower_id = ? AND status = 1", userID).
+		Count(&followingCount).Error
 	if err != nil {
-		logger.Warn("GetFolloweeCount from Redis failed", zap.Error(err))
-		// Redis 失败，降级到 DB
-		followingCount, err = GetFolloweeCountFromDB(ctx, userID)
-		if err != nil {
-			return 0, 0, err
-		}
+		return 0, 0, fmt.Errorf("GetUserFollowStats get following failed: %w", err)
 	}
 
-	followerCount, err = GetFollowerCount(ctx, userID)
+	// 查询粉丝数
+	err = DB.WithContext(ctx).Model(&model.Relation{}).
+		Where("followee_id = ? AND status = 1", userID).
+		Count(&followerCount).Error
 	if err != nil {
-		logger.Warn("GetFollowerCount from Redis failed", zap.Error(err))
-		// Redis 失败，降级到 DB
-		followerCount, err = GetFollowerCountFromDB(ctx, userID)
-		if err != nil {
-			return 0, 0, err
-		}
+		return 0, 0, fmt.Errorf("GetUserFollowStats get follower failed: %w", err)
 	}
 
 	return followingCount, followerCount, nil

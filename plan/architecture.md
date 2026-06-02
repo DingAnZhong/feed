@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-本项目是一个面向千万级用户的社交 Feed 流系统，支持用户注册、关注关系管理、内容发布、个性化时间线推送和热门内容推荐。系统采用**推模式（Push Model）**实现 Feed 流分发，通过 Kafka 异步解耦写入与扇出，利用 Redis ZSet 实现高性能时间线缓存。
+本项目是一个面向千万级用户的社交 Feed 浓系统，支持用户注册、关注关系管理、内容发布、个性化时间线推送和热门内容推荐。系统采用**推拉结合模式（Push-Pull Combined Model）**实现 Feed 流分发：普通用户使用**推模式（Push）**通过 Kafka 异步扇出到粉丝 Redis Timeline；大 V 用户降级为**拉模式（Pull）**减少扇出压力；系统还支持**拉取补充热门帖子**实现内容多样性。通过 Redis Sorted Set 实现高性能时间线缓存。
 
 ---
 
@@ -44,6 +44,11 @@
     └──────────────────────────────────────────────────────────────┘  │
               └──────────────────────────────────────────────────────┘
 ```
+
+**推拉结合策略**：
+- **推模式（Push）**：粉丝数 < `huge_user_threshold`（默认 1000）的普通用户，发帖时通过 Kafka 异步推送到所有粉丝 Timeline
+- **拉模式（Pull）**：粉丝数 ≥ `huge_user_threshold` 的大 V 用户，发帖时不推送，粉丝拉取时直接从作者帖子表查询
+- **热门补充**：Feed 拉取时，若推模式结果不足，自动补充热门帖子（`like_count > popular_post_threshold`）
 
 ---
 
@@ -284,7 +289,7 @@ go run cmd/worker/main.go  # 启动 Worker
 |------|------|-----------|
 | 鉴权 | 模拟鉴权（X-User-ID Header） | 接入 JWT / OAuth2 |
 | 关注/粉丝数 | 无计数缓存 | **已完成** Redis 原子计数器 (`follower_counter.go`) |
-| 推拉结合 | 纯推模式 | 大 V 降级为拉模式（Pull），减少扇出压力 |
+| 推拉结合 | **已完成** 推拉结合模式（huge_user_threshold=1000），普通用户推模式，大 V 拉模式，热门帖子补充 | 支持配置化阈值调整 |
 | 内容审核 | 无 | 接入敏感词过滤 / 第三方审核 API |
 | 单元测试 | 仅有压测工具 | **已完成** Service/Repository 层单元测试 (22 个 Service + 9 个 Repository 测试，100% 通过) |
 | 监控 | 仅有日志 | Prometheus 指标 + Grafana 面板 |
@@ -292,7 +297,7 @@ go run cmd/worker/main.go  # 启动 Worker
 
 ---
 
-## 10. 压测结果与性能指标
+## 12. 压测结果与性能指标
 
 ### 10.1 测试环境
 
@@ -354,10 +359,91 @@ go run cmd/worker/main.go  # 启动 Worker
 
 | 瓶颈点 | 当前优化 | 进一步优化方向 |
 |--------|----------|----------------|
-| 发布延迟 | Kafka 异步扇出 | 热点用户降级为 Pull 模式 |
+| 发布延迟 | Kafka 异步扇出 + 推拉结合（大 V 不推送） | 热点用户自动识别并降级为 Pull 模式 |
 | Redis 写入 | Lua 脚本原子操作 | 批量写入 + 连接池优化 |
 | 粉丝列表查询 | 分批查询 (500/批) | Redis 缓存粉丝 ID 列表 |
 | 数据库连接 | 连接池 (MaxOpenConns=100) | 读写分离 + 分库分表 |
+
+---
+
+## 10. 推拉结合模式详细设计
+
+### 10.1 模式选择策略
+
+```
+用户发帖
+   │
+   ├─ 查询作者粉丝数 follower_count
+   │
+   ├─ follower_count < huge_user_threshold (1000)
+   │  └─ 推模式：通过 Kafka 异步推送到所有粉丝 Timeline
+   │
+   └─ follower_count ≥ huge_user_threshold
+      └─ 拉模式：仅写入作者自己帖子表，粉丝拉取时实时查询
+```
+
+### 10.2 Feed 拉取流程（推拉结合）
+
+```
+Client → GET /web/api/v1/feed/timeline
+   │
+   ├─ 1. 从 Redis ZSet (feed:timeline:{userID}) 拉取推模式帖子
+   │  └─ GetTimeline() → ZRevRangeByScore (倒序，最新的在前)
+   │
+   ├─ 2. 若推模式结果不足 limit
+   │  └─ 拉模式补充：
+   │     - 查询热门帖子 (CacheGetPopularPosts)
+   │     - 过滤已存在的帖子 ID
+   │     - 混合组合结果
+   │
+   ├─ 3. 批量查询 MySQL 获取帖子详情
+   │  └─ FIELD(id, ...) 保持 Redis 排序
+   │
+   └─ 4. 过滤审核不通过的帖子 (status = 2)
+   │
+   └─ 5. 按 originalPostIDs 顺序排序返回
+```
+
+### 10.3 核心代码实现
+
+**repository/feed_cache.go - GetTimeline**
+```go
+// 使用 ZRevRangeByScore 获取时间倒序的帖子（最新的在前）
+func GetTimeline(ctx context.Context, userID int64, latestTime int64, limit int) ([]int64, error) {
+    result, err := RDB.ZRevRangeByScore(ctx, key, &redis.ZRangeBy{
+        Max:   "+inf",  // 首次拉取
+        Min:   "-inf",
+        Count: int64(limit),
+    }).Result()
+    // 解析为 []int64 并返回（已按时间倒序）
+}
+```
+
+**service/feed_service.go - FetchFeed**
+```go
+func FetchFeed(ctx context.Context, userID int64, latestTime int64, limit int) ([]*Post, int64, error) {
+    // 1. 推模式：从 timeline 拉取
+    postIDs, _ := repository.GetTimeline(ctx, userID, latestTime, limit)
+    
+    // 2. 拉模式：若不足，补充热门帖子
+    if pullModeEnabled && len(postIDs) < limit {
+        popularPosts, _ := repository.CacheGetPopularPosts(ctx, popularLimit*2)
+        // 过滤已存在，组合结果
+    }
+    
+    // 3. 按 originalPostIDs 顺序排序返回
+}
+```
+
+### 10.4 配置参数
+
+```yaml
+app:
+  pull_mode:
+    enabled: true                    # 启用推拉结合
+    huge_user_threshold: 1000        # 大 V 粉丝阈值
+    popular_post_threshold: 1000     # 热门帖子门槛（点赞数）
+```
 
 ---
 

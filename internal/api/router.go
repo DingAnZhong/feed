@@ -17,6 +17,7 @@ var dist embed.FS
 func SetupRouter() *gin.Engine {
 	r := gin.Default()
 
+	r.Use(middleware.CORSMiddleware())
 	r.Use(middleware.RateLimitMiddleware())
 
 	// 公开 API（不需要鉴权）

@@ -22,7 +22,10 @@ type AppConfig struct {
 	Name                      string         `mapstructure:"name"`
 	Port                      int            `mapstructure:"port"`
 	Env                       string         `mapstructure:"env"`
+	// 大 V 用户粉丝阈值：粉丝数超过此值的用户采用推拉结合模式
 	HugeUserFollowerThreshold int            `mapstructure:"huge_user_follower_threshold"`
+	// 推拉结合模式配置
+	PullMode                  *PullModeConfig `mapstructure:"pull_mode"`
 	LocalCache                *LocalCacheConfig `mapstructure:"local_cache"`
 }
 
@@ -37,6 +40,15 @@ type LocalCacheConfig struct {
 	TTLSeconds        int  `mapstructure:"ttl_seconds"`
 	MaxItems          int  `mapstructure:"max_items"`
 	EmptyCacheTTL     int  `mapstructure:"empty_cache_ttl_seconds"`
+}
+
+// PullModeConfig 推拉结合模式配置
+type PullModeConfig struct {
+	Enabled           bool `mapstructure:"enabled"`
+	// 大 V 粉丝阈值：粉丝数超过此值的用户采用推拉结合模式
+	HugeUserThreshold int `mapstructure:"huge_user_threshold"`
+	// 热门帖子拉模式阈值：点赞数超过此值的帖子采用拉模式
+	PopularPostThreshold int `mapstructure:"popular_post_threshold"`
 }
 
 type MySQLConfig struct {

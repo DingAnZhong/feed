@@ -1,10 +1,13 @@
-// 开发环境 (Vite proxy): /api -> http://127.0.0.1:8080 (dev 时后端也是 /api)
+// 开发环境 (Vite proxy): /web/api -> http://127.0.0.1:8083
 // 生产环境 (Go embed): API 在 /web/api
-const isProd = !import.meta.env.DEV
-const API_PREFIX = isProd ? '/web/api' : ''
+const API_PREFIX = '/web/api'
 
 function getUserId() {
   return localStorage.getItem('feed_user_id')
+}
+
+function getAccessToken() {
+  return localStorage.getItem('feed_access_token')
 }
 
 async function request(url, options = {}) {
@@ -13,8 +16,13 @@ async function request(url, options = {}) {
     ...options.headers,
   }
   const userId = getUserId()
+  const accessToken = getAccessToken()
+
   if (userId) {
     headers['X-User-ID'] = userId
+  }
+  if (accessToken) {
+    headers['Authorization'] = `Bearer ${accessToken}`
   }
 
   const config = {

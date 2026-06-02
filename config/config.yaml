@@ -1,9 +1,14 @@
 app:
   name: "feed-system"
-  port: 8080
+  port: 8083
   env: "dev"
   # 大 V 阈值（粉丝数超过此值降级为拉模式）
   huge_user_follower_threshold: 10000
+  # 推拉结合模式配置
+  pull_mode:
+    enabled: true
+    huge_user_threshold: 1000
+    popular_post_threshold: 1000
   # 本地缓存配置
   local_cache:
     enabled: true
@@ -25,17 +30,17 @@ log:
   max_age: 7
 
 mysql:
-  dsn: "root:123456@tcp(192.168.100.128:3306)/feed_db?charset=utf8mb4&parseTime=True&loc=Local"
+  dsn: "root:123456@tcp(127.0.0.1:13306)/feed_db?charset=utf8mb4&parseTime=True&loc=Local"
   max_open_conns: 100
   max_idle_conns: 20
 
 redis:
-  addr: "192.168.100.128:6379"
+  addr: "127.0.0.1:6379"
   password: ""
   db: 0
   pool_size: 100
 
 kafka:
   brokers:
-    - "192.168.100.128:9092"
+    - "127.0.0.1:9092"
   topic_feed: "feed"

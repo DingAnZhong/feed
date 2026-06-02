@@ -10,6 +10,9 @@ const nickname = ref('')
 const loading = ref(false)
 const error = ref('')
 
+// API 地址 - 开发环境使用相对路径通过 Vite 代理，生产环境使用绝对路径
+const API_BASE = import.meta.env.DEV ? '' : 'http://127.0.0.1:8081'
+
 async function handleLogin() {
   if (!userId.value.trim()) {
     error.value = '请输入用户 ID'
@@ -24,11 +27,22 @@ async function handleLogin() {
   try {
     const id = userId.value.trim()
     const nk = nickname.value.trim() || `用户${id}`
+
+    // 调用登录 API
+    const response = await axios.post(`${API_BASE}/web/api/v1/user/login`, {
+      user_id: parseInt(id, 10),
+      nickname: nk
+    })
+
+    // 保存 token 和用户信息
+    localStorage.setItem('feed_access_token', response.data.data.access_token)
+    localStorage.setItem('feed_refresh_token', response.data.data.refresh_token)
     localStorage.setItem('feed_user_id', id)
     localStorage.setItem('feed_nickname', nk)
+
     router.push('/feed')
   } catch (err) {
-    error.value = err.message
+    error.value = err.response?.data?.msg || '登录失败'
   } finally {
     loading.value = false
   }
@@ -52,9 +66,20 @@ async function handleRegister() {
   try {
     const id = parseInt(userId.value.trim(), 10)
     const nk = nickname.value.trim()
-    await axios.post('/web/api/v1/user/register', { user_id: id, nickname: nk })
+    await axios.post(`${API_BASE}/web/api/v1/user/register`, { user_id: id, nickname: nk })
+
+    // 注册成功后自动登录
+    const response = await axios.post(`${API_BASE}/web/api/v1/user/login`, {
+      user_id: id,
+      nickname: nk
+    })
+
+    // 保存 token 和用户信息
+    localStorage.setItem('feed_access_token', response.data.data.access_token)
+    localStorage.setItem('feed_refresh_token', response.data.data.refresh_token)
     localStorage.setItem('feed_user_id', String(id))
     localStorage.setItem('feed_nickname', nk)
+
     router.push('/feed')
   } catch (err) {
     error.value = err.response?.data?.msg || '注册失败'

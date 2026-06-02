@@ -7,10 +7,21 @@ import (
 
 	"github.com/DingAnZhong/feed/internal/model"
 	"github.com/DingAnZhong/feed/internal/repository"
+	"github.com/DingAnZhong/feed/pkg/config"
 	"github.com/DingAnZhong/feed/pkg/logger"
 	"github.com/IBM/sarama"
 	"go.uber.org/zap"
 )
+
+// 推拉结合模式的大 V 阈值
+var hugeUserFollowerThreshold int64 = 1000
+
+func init() {
+	// 从配置加载大 V 阈值
+	if config.Conf.App != nil && config.Conf.App.PullMode != nil && config.Conf.App.PullMode.HugeUserThreshold > 0 {
+		hugeUserFollowerThreshold = int64(config.Conf.App.PullMode.HugeUserThreshold)
+	}
+}
 
 // StartConsumer 启动 Kafka 消费者组
 func StartConsumer(ctx context.Context, addrs []string) error {
@@ -58,18 +69,46 @@ func (c *PostEventConsumer) ConsumeClaim(session sarama.ConsumerGroupSession, cl
 			session.MarkMessage(msg, "")
 			continue
 		}
-		followIDs, err := repository.GetFollowerIDs(context.Background(), event.UserID)
+
+		// 获取作者的粉丝数，判断是否是大 V
+		followerCount, _, err := repository.GetUserFollowStats(context.Background(), event.UserID)
 		if err != nil {
-			logger.Error("获取粉丝列表失败", zap.Error(err))
-			return fmt.Errorf("获取粉丝列表失败:%w", err)
+			logger.Warn("获取粉丝数失败，使用默认策略", zap.Error(err), zap.Int64("user_id", event.UserID))
 		}
-		if len(followIDs) > 0 {
-			err = repository.PushToTimeline(context.Background(), followIDs, event.PostID, event.Timestamp)
+
+		// 推拉结合策略
+		if followerCount >= hugeUserFollowerThreshold {
+			// 大 V 用户：推拉结合模式
+			// 1. 只推送到自己的 timeline（自推）
+			logger.Info("大 V 发帖，采用推拉结合模式",
+				zap.Int64("user_id", event.UserID),
+				zap.Int64("follower_count", followerCount),
+				zap.Int64("post_id", event.PostID))
+
+			// 推送到自己的 timeline
+			err = repository.PushToSelfTimeline(context.Background(), event.UserID, event.PostID, event.Timestamp)
 			if err != nil {
-				logger.Error("写入 Redis 收件箱失败", zap.Error(err))
-				return fmt.Errorf("写入 Redis 收件箱失败:%w", err)
+				logger.Error("推送到大 V 自己的 timeline 失败", zap.Error(err))
+			}
+
+			// 2. 热门帖子额外推送到热门池（供拉模式使用）
+			// 这里可以添加额外逻辑：如果帖子预计会成为热门，推送到热门池
+		} else {
+			// 普通用户：纯推模式
+			followIDs, err := repository.GetFollowerIDs(context.Background(), event.UserID)
+			if err != nil {
+				logger.Error("获取粉丝列表失败", zap.Error(err))
+				return fmt.Errorf("获取粉丝列表失败:%w", err)
+			}
+			if len(followIDs) > 0 {
+				err = repository.PushToTimeline(context.Background(), followIDs, event.PostID, event.Timestamp)
+				if err != nil {
+					logger.Error("写入 Redis 收件箱失败", zap.Error(err))
+					return fmt.Errorf("写入 Redis 收件箱失败:%w", err)
+				}
 			}
 		}
+
 		session.MarkMessage(msg, "")
 	}
 	return nil

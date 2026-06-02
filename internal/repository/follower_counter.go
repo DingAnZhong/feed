@@ -80,6 +80,9 @@ func SyncFollowerCountFromDB(ctx context.Context, userID int64) (int64, error) {
 		return 0, err
 	}
 
+	// 同时更新 L1 本地缓存
+	CacheInvalidateFollowStats(userID)
+
 	return count, nil
 }
 
@@ -98,6 +101,9 @@ func SyncFolloweeCountFromDB(ctx context.Context, userID int64) (int64, error) {
 		logger.Warn("SyncFolloweeCountFromDB failed", zap.Error(err))
 		return 0, err
 	}
+
+	// 同时更新 L1 本地缓存
+	CacheInvalidateFollowStats(userID)
 
 	return count, nil
 }
