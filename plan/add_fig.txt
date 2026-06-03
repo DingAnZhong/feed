@@ -1,0 +1,35 @@
+ 帖子图片功能 — 实现总结
+
+  已有的后端支持（无需修改）
+
+  后端代码中 MediaUrls []string 字段和相关 API 已经存在：
+  - internal/model/post.go — Post 模型已有 MediaUrls 字段（JSON 类型）
+  - internal/api/post_handler.go — 请求体已包含 MediaUrls
+  - internal/service/post_service.go — service 层已处理媒体 URL
+  - internal/repository/local_cache.go — 缓存通过 JSON marshal/unmarshal 自动包含 MediaUrls
+  - frontend/src/views/Feed.vue — 前端展示页面已有图片缩略图渲染
+
+  本次修改（frontend/src/views/Publish.vue）
+  - internal/repository/local_cache.go — 缓存通过 JSON marshal/unmarshal 自动包含 MediaUrls
+  - frontend/src/views/Feed.vue — 前端展示页面已有图片缩略图渲染
+
+  本次修改（frontend/src/views/Publish.vue）
+
+  新增了完整的图片上传 UI 功能：
+
+  1. 图片选择区域 — 点击或拖拽上传
+  2. 图片预览 — 已选图片以网格形式展示缩略图
+  3. 删除已选图片 — 每张预览图右上角有关闭按钮
+  4. 数量限制 — 最多 9 张图片
+  5. 大小限制 — 单张图片不超过 5MB
+  6. 格式验证 — 仅允许图片文件（JPG/PNG/GIF）
+  7. 重复检测 — 防止同一文件重复选择
+  8. 提交时编码 — 将图片文件转为 base64 Data URL 作为 media_urls 传给后端
+  9. 内存管理 — 发布成功后释放 URL.createObjectURL 占用的内存
+
+  后续建议
+
+  当前使用 base64 内嵌方式作为临时方案。在实际生产环境中，建议：
+  - 接入真正的 OSS 图片存储（如阿里云 OSS、AWS S3）
+  - 添加图片压缩/裁剪功能
+  - 添加图片审核接口（与现有的敏感词审核配合）

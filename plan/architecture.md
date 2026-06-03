@@ -2,7 +2,11 @@
 
 ## 1. 项目概述
 
-本项目是一个面向千万级用户的社交 Feed 浓系统，支持用户注册、关注关系管理、内容发布、个性化时间线推送和热门内容推荐。系统采用**推拉结合模式（Push-Pull Combined Model）**实现 Feed 流分发：普通用户使用**推模式（Push）**通过 Kafka 异步扇出到粉丝 Redis Timeline；大 V 用户降级为**拉模式（Pull）**减少扇出压力；系统还支持**拉取补充热门帖子**实现内容多样性。通过 Redis Sorted Set 实现高性能时间线缓存。
+本项目是一个面向千万级用户的社交 Feed 流系统，支持用户注册、关注关系管理、内容发布、个性化时间线推送、热门内容推荐和图片内容发布。系统采用**推拉结合模式（Push-Pull Combined Model）**实现 Feed 流分发：普通用户使用**推模式（Push）**通过 Kafka 异步扇出到粉丝 Redis Timeline；大 V 用户降级为**拉模式（Pull）**减少扇出压力；系统还支持**拉取补充热门帖子**实现内容多样性。通过 Redis Sorted Set 实现高性能时间线缓存。
+
+### 1.1 最新功能（2026-06-03）
+
+**帖子图片功能**：用户发布帖子时可附带最多 9 张图片（单张 ≤5MB，支持 JPG/PNG/GIF），图片通过 base64 编码随帖子内容存储到 MySQL 的 `media_urls` JSON 字段。前端 `Publish.vue` 实现了完整的图片上传 UI（拖拽、预览、删除、重复检测、大小/格式验证），后端已有 `media_urls` 字段支持无需修改。
 
 ---
 
@@ -182,6 +186,32 @@ Client → GET /web/api/v1/feed/timeline?feed_type=popular&limit=20
   └─ 直接查询 MySQL: ORDER BY like_count DESC LIMIT 20
 ```
 
+### 4.4 发布帖子（图片功能）
+
+```
+Client → POST /web/api/v1/post/publish
+  │
+  ├─ 1. Auth 中间件解析 X-User-ID
+  ├─ 2. Handler 校验参数（content 非空，≤500 字符；media_urls ≤9 张，≤5MB/张）
+  ├─ 3. Service 生成 Snowflake ID
+  ├─ 4. Repository 写入 MySQL (posts 表，media_urls 存储为 JSON)
+  ├─ 5. Producer 发送 PostPublishEvent 到 Kafka
+  └─ 6. 返回 {post_id} 给客户端（<50ms）
+
+  --- 异步 ---
+
+  Worker Consumer 收到事件
+  ├─ 7. 查询作者粉丝列表 (GetFollowerIDs)
+  ├─ 8. 16 并发 goroutine 推送到每个粉丝的 Redis ZSet
+  └─ 9. Lua 脚本原子 ZADD + 裁剪（保留最近 1000 条）
+```
+
+**前端图片上传功能**：
+- 支持拖拽/点击上传，最多 9 张图片
+- 图片预览网格 + 删除功能
+- 格式验证（JPG/PNG/GIF）+ 大小限制（≤5MB/张）
+- 重复文件检测 + Base64 编码上传
+
 ---
 
 ## 5. 数据模型
@@ -280,6 +310,7 @@ go run cmd/worker/main.go  # 启动 Worker
 | 限流影响可用性 | Fail-open 设计：Redis 不可用时限流失效但不阻塞请求 |
 | ID 冲突 | Snowflake 全局唯一，趋势递增，对索引友好 |
 | 帖子详情批量查询 | MySQL `FIELD()` 函数保持 Redis 返回的排序，避免应用层二次排序 |
+| 热门帖子查询内存溢出 | 两阶段查询：先查 IDs，再通过 `GetPostsByIDs` 查询详情 |
 
 ---
 
@@ -294,6 +325,8 @@ go run cmd/worker/main.go  # 启动 Worker
 | 单元测试 | 仅有压测工具 | **已完成** Service/Repository 层单元测试 (22 个 Service + 9 个 Repository 测试，100% 通过) |
 | 监控 | 仅有日志 | Prometheus 指标 + Grafana 面板 |
 | 多级缓存 | 仅 Redis | 热点用户本地缓存（BigCache / sync.Map） |
+| 图片存储 | Base64 内嵌存储 | 接入 OSS（阿里云/腾讯云/S3）+ CDN 加速 |
+| 图片处理 | 无 | 图片压缩/裁剪/缩略图生成 |
 
 ---
 
@@ -447,6 +480,68 @@ app:
 
 ---
 
+## 10. 图片功能实现细节
+
+### 10.5 图片上传前端实现（Publish.vue）
+
+```
+用户选择图片
+   │
+   ├─ 验证：格式（JPG/PNG/GIF）、大小（≤5MB/张）、数量（≤9 张）
+   ├─ 重复检测：通过 File.name + File.size + File.lastModified 生成唯一 key
+   ├─ 预览：URL.createObjectURL 生成缩略图
+   └─ 提交：FileReader.readAsDataURL → Base64 Data URL → media_urls[]
+```
+
+**关键代码逻辑**：
+- 拖拽/点击触发 `<input type="file" multiple>`
+- `previewImages` 数组存储已选图片（含预览 URL）
+- 删除图片时 `URL.revokeObjectURL` 释放内存
+- 发布时将 `media_urls`（Base64 数组）传给后端
+
+### 10.6 图片展示前端实现（Feed.vue）
+
+```vue
+<div v-if="post.media_urls?.length" class="post-media">
+  <img
+    v-for="(url, idx) in post.media_urls.slice(0, 3)"
+    :key="idx"
+    :src="url"
+    alt=""
+    class="media-thumb"
+    @error="$event.target.style.display='none'"
+  />
+</div>
+```
+
+**设计要点**：
+- 最多显示前 3 张图片（Grid 布局）
+- 图片加载失败时隐藏
+- Base64 数据直接渲染，无需额外请求
+
+### 10.7 后端存储结构
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `media_urls` | JSON | 存储图片 URL 列表，支持 0-9 张图片 |
+
+**示例数据**：
+```json
+{
+  "id": 290316659183325184,
+  "user_id": 1234,
+  "content": "今天天气不错",
+  "media_urls": [
+    "data:image/jpeg;base64,/9j/4AAQSkZJRg...",
+    "data:image/png;base64,iVBORw0KGgo..."
+  ],
+  "like_count": 0,
+  "comment_count": 0
+}
+```
+
+---
+
 ## 11. 单元测试详情
 
 ### 11.1 Service 层测试 (22 个)
@@ -462,7 +557,7 @@ app:
 | 测试文件 | 测试用例数 | 说明 |
 |----------|-----------|------|
 | `post_repo_test.go` | 8 | 帖子 CRUD、批量查询、状态更新 |
-| `feed_cache_test.go` | 1 | 热门帖子查询 |
+| `feed_cache_test.go` | 1 | 热门帖子查询（含两阶段查询优化） |
 | `user_repo_test.go` | 0 | 关注逻辑在 Service 层测试覆盖 |
 
 ### 11.3 测试覆盖率关键点
@@ -470,3 +565,106 @@ app:
 - **Snowflake ID**: 所有测试使用雪花 ID 避免主键冲突
 - **数据隔离**: 每个测试用例独立数据范围 (ID >= 3000)
 - **依赖注入**: 支持 mock Redis/Kafka 进行单元测试
+
+---
+
+## 12. 常见问题与解决方案
+
+### 12.1 问题：热门推荐获取失败（数据库排序内存溢出）
+
+**错误信息**：`Error 1038 (HY001): Out of sort memory, consider increasing server sort buffer size`
+
+**原因**：`GetPopularPosts` 直接使用 `ORDER BY like_count DESC, id DESC` 查询整表，MySQL 需要大量排序内存。
+
+**解决方案**：两阶段查询优化
+```go
+// 阶段1：只查询需要的字段（ID 和 like_count），减少内存使用
+var idLikeCounts []IDLikeCount
+err := DB.Select("id, like_count").Order("like_count DESC, id DESC").Limit(limit).Find(&idLikeCounts).Error
+
+// 阶段2：根据 IDs 批量查询完整帖子详情
+var postIDs []int64
+for _, ic := range idLikeCounts {
+    postIDs = append(postIDs, ic.ID)
+}
+posts, err = GetPostsByIDs(ctx, postIDs)
+```
+
+**效果**：第一阶段只返回 ID 和点赞数，避免加载整个 Post 行数据到内存，大幅降低排序内存需求。
+
+### 12.2 问题：前端图片上传验证不生效
+
+**解决方案**：在 `Publish.vue` 中实现完整的前端验证
+- 格式验证：检查 `file.type.startsWith('image/')`
+- 大小验证：`file.size <= 5 * 1024 * 1024`
+- 数量限制：`previewImages.length < 9`
+- 重复检测：使用 `File.name + File.size + File.lastModified` 生成唯一 key
+
+---
+
+## 13. 压测结果与性能指标
+
+### 13.1 测试环境
+
+| 组件 | 版本 | 配置 |
+|------|------|------|
+| MySQL | 8.0 | 127.0.0.1:13306 |
+| Redis | 7.0 | 127.0.0.1:6379 |
+| Kafka | 3.7 | 127.0.0.1:9092 |
+
+### 13.2 压测数据
+
+#### 场景 1: 发帖压测 (Publish Post)
+| 指标 | 数值 |
+|------|------|
+| 吞吐量 | 3214.44 req/s |
+| 平均延迟 | 19.26ms |
+| P50 延迟 | 21.88ms |
+| P90 延迟 | 26.59ms |
+| P95 延迟 | 27.09ms |
+| P99 延迟 | 28.08ms |
+| 成功率 | 100% |
+
+#### 场景 2: Feed 流拉取 (Feed Timeline)
+| 指标 | 数值 |
+|------|------|
+| 吞吐量 | 4155.78 req/s |
+| 平均延迟 | 11.92ms |
+| P50 延迟 | 9.06ms |
+| P90 延迟 | 22.04ms |
+| P95 延迟 | 22.54ms |
+| P99 延迟 | 23.08ms |
+| 成功率 | 100% |
+
+#### 场景 3: 关注操作 (Follow/Unfollow)
+| 指标 | 数值 |
+|------|------|
+| 吞吐量 | 7098.14 req/s |
+| 平均延迟 | 7.17ms |
+| P50 延迟 | 7.52ms |
+| P90 延迟 | 12.61ms |
+| P95 延迟 | 12.61ms |
+| P99 延迟 | 13.10ms |
+| 成功率 | 100% |
+
+#### 场景 4: 混合并发压测 (Mixed Scenario)
+| 指标 | 数值 |
+|------|------|
+| 吞吐量 | 7861.64 req/s |
+| 平均延迟 | 893µs |
+| 成功率 | 100% |
+
+### 13.3 测试总结
+
+- **Service 层**: 22 个测试全部通过
+- **Repository 层**: 9 个测试全部通过
+- **所有压测请求**: 100% 成功
+
+### 13.4 性能瓶颈分析
+
+| 瓶颈点 | 当前优化 | 进一步优化方向 |
+|--------|----------|----------------|
+| 发布延迟 | Kafka 异步扇出 + 推拉结合（大 V 不推送） | 热点用户自动识别并降级为 Pull 模式 |
+| Redis 写入 | Lua 脚本原子操作 | 批量写入 + 连接池优化 |
+| 粉丝列表查询 | 分批查询 (500/批) | Redis 缓存粉丝 ID 列表 |
+| 数据库连接 | 连接池 (MaxOpenConns=100) | 读写分离 + 分库分表 |
