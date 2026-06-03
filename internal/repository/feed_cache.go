@@ -161,6 +161,7 @@ func GetTimeline(ctx context.Context, userID int64, latestTime int64, limit int)
 }
 
 // GetPopularPosts 获取热门帖子（按点赞数降序）
+// 使用两阶段查询：先查 IDs，再查详情，避免大表排序
 func GetPopularPosts(ctx context.Context, limit int) ([]*model.Post, error) {
 	var posts []*model.Post
 
@@ -169,11 +170,38 @@ func GetPopularPosts(ctx context.Context, limit int) ([]*model.Post, error) {
 		return posts, nil
 	}
 
-	err := DB.WithContext(ctx).Order("like_count DESC, id DESC").Limit(limit).Find(&posts).Error
+	// 阶段1：只查询需要的字段（ID 和 like_count），减少内存使用
+	type IDLikeCount struct {
+		ID        int64 `gorm:"column:id"`
+		LikeCount int   `gorm:"column:like_count"`
+	}
+	var idLikeCounts []IDLikeCount
+	err := DB.WithContext(ctx).
+		Table("posts").
+		Order("like_count DESC, id DESC").
+		Limit(limit).
+		Select("id, like_count").
+		Find(&idLikeCounts).Error
 	if err != nil {
 		logger.Warn("GetPopularPosts failed", zap.Error(err))
 		return nil, fmt.Errorf("GetPopularPosts failed:%w", err)
 	}
+
+	if len(idLikeCounts) == 0 {
+		return posts, nil
+	}
+
+	// 阶段2：根据 IDs 批量查询完整帖子详情
+	var postIDs []int64
+	for _, ic := range idLikeCounts {
+		postIDs = append(postIDs, ic.ID)
+	}
+	posts, err = GetPostsByIDs(ctx, postIDs)
+	if err != nil {
+		logger.Warn("GetPopularPosts GetPostsByIDs failed", zap.Error(err))
+		return nil, fmt.Errorf("GetPopularPosts GetPostsByIDs failed:%w", err)
+	}
+
 	return posts, nil
 }
 

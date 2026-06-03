@@ -5,6 +5,16 @@
 
 基于 Go 语言构建的千万级高并发 Feed 流异步分发系统。采用**推拉结合模式**架构设计，普通用户使用推模式（Push）通过 Kafka 异步扇出到粉丝 Redis Timeline；大 V 用户降级为拉模式（Pull）减少扇出压力；系统还支持拉取补充热门帖子实现内容多样性。通过 Redis Sorted Set 实现高性能时间线缓存。
 
+## ✨ 最新功能 (Latest Features)
+
+**帖子图片功能** (2026-06-03)：
+- 用户发布帖子时可附带最多 9 张图片（单张 ≤5MB，支持 JPG/PNG/GIF）
+- 前端 `Publish.vue` 实现完整的图片上传 UI（拖拽/点击、预览、删除、重复检测、大小/格式验证）
+- 图片通过 Base64 编码存储到 MySQL 的 `media_urls` JSON 字段
+- 前端 `Feed.vue` 支持图片缩略图展示（Grid 布局，最多显示前 3 张）
+
+---
+
 ## 🏗️ 架构概览 (Architecture)
 
 本系统采用**前后端分离 + 微服务**架构：
@@ -217,9 +227,13 @@ POST /web/api/v1/user/logout
 ```json
 {
     "content": "今天天气不错，系统终于跑通了！",
-    "media_urls": ["https://image.com/1.jpg"]
+    "media_urls": ["data:image/jpeg;base64,/9j/4AAQSkZJRg..."]
 }
 ```
+* **图片上传说明**: 
+  - 支持最多 9 张图片，单张 ≤5MB
+  - 图片格式：JPG/PNG/GIF
+  - 图片通过 Base64 编码随帖子内容存储
 * **业务流向**: API -> Kafka -> Worker -> (查询粉丝列表) -> (推送 Redis ZSet & 写入 MySQL)。
 
 ---
@@ -303,6 +317,40 @@ Feed 流的核心前提是有关注关系。调用此接口建立 A 关注 B 的
   * **L3 数据库降级**：缓存未命中时查询 MySQL，查询后回填两级缓存。
   * **缓存命中率优化**：通过本地缓存减少 Redis 访问，降低 Redis 压力。
   * **循环依赖规避**：`GetUserByID`、`GetPostsByUserID`、`GetUserFollowStats` 等函数直接查询数据库，避免与缓存函数形成循环依赖。
+
+---
+
+## 🖼️ 图片功能使用说明
+
+### 前端图片上传
+
+在发布页面点击图片上传区域或拖拽图片，支持以下功能：
+
+| 功能 | 说明 |
+|------|------|
+| 拖拽上传 | 直接拖拽图片到上传区域 |
+| 点击选择 | 点击区域打开文件选择对话框 |
+| 预览 | 上传后立即预览缩略图 |
+| 删除 | 点击图片右上角 X 删除 |
+| 限制 | 最多 9 张，单张 ≤5MB |
+| 格式 | 仅支持 JPG/PNG/GIF |
+| 重复检测 | 同一文件不可重复选择 |
+
+### 图片存储格式
+
+图片通过 Base64 编码存储到数据库 `media_urls` 字段：
+
+```json
+{
+  "content": "今天天气不错",
+  "media_urls": [
+    "data:image/jpeg;base64,/9j/4AAQSkZJRg...",
+    "data:image/png;base64,iVBORw0KGgo..."
+  ]
+}
+```
+
+**注意**：当前使用 Base64 内嵌方式作为临时方案。生产环境建议接入 OSS 存储服务。
 
 ---
 
@@ -540,6 +588,7 @@ go test -bench=. -benchtime=10s ./test/...
 | 帖子详情批量查询 | MySQL `FIELD()` 函数保持 Redis 返回的排序 |
 | 多级缓存 | L1 本地缓存（sync.Map） + L2 Redis + L3 DB 降级 |
 | 热门补充 | Feed 拉取时自动补充热门帖子，提升内容多样性 |
+| 热门帖子查询内存溢出 | 两阶段查询：先查 IDs，再通过 `GetPostsByIDs` 查询详情 |
 
 ---
 
@@ -553,6 +602,7 @@ go test -bench=. -benchtime=10s ./test/...
 | 监控 | ✅ 结构化日志 | Prometheus + Grafana |
 | 多级缓存 | ✅ 本地缓存（sync.Map） | BigCache 性能优化 |
 | 推拉结合 | ✅ 大 V 降级为拉模式（Pull） | 粉丝分层 + 混合模式 + 自动识别热点用户 |
+| 图片功能 | ✅ Base64 内嵌存储，最多 9 张 | 接入 OSS（阿里云/腾讯云/S3）+ CDN 加速 |
 
 ---
 
